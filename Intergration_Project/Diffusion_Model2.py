@@ -1,7 +1,10 @@
+import os
 import math
 import copy
 import random
 import numpy as np
+import matplotlib.pyplot as plt
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -268,6 +271,9 @@ def train_ddpm(
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     ema = EMA(model, decay=0.999)
 
+    loss_history = []
+    lr_history = []
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0.0
@@ -292,10 +298,16 @@ def train_ddpm(
             total_loss += loss.item() * bsz
             total_num += bsz
 
-        lr_scheduler.step()
-        print(f"Epoch {epoch+1:03d} | Loss = {total_loss / total_num:.6f}")
+        epoch_loss = total_loss / total_num
+        current_lr = optimizer.param_groups[0]["lr"]
 
-    return ema.get_model()
+        loss_history.append(epoch_loss)
+        lr_history.append(current_lr)
+
+        lr_scheduler.step()
+        print(f"Epoch {epoch+1:03d} | Loss = {epoch_loss:.6f} | LR = {current_lr:.6e}")
+
+    return ema.get_model(), loss_history, lr_history
 
 
 # ============================================================
@@ -422,12 +434,130 @@ def nmse_db(x_hat, x_true):
 
 
 # ============================================================
-# 10. 主程序
+# 10. 可视化函数
+# ============================================================
+
+def plot_training_curves(loss_history, lr_history, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+
+    plt.figure(figsize=(7, 5))
+    plt.plot(loss_history, marker='o')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss Curve")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "loss_curve.png"), dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    plt.plot(lr_history, marker='o')
+    plt.xlabel("Epoch")
+    plt.ylabel("Learning Rate")
+    plt.title("Learning Rate Curve")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "lr_curve.png"), dpi=200)
+    plt.close()
+
+
+def plot_mask(mask, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+    mask_np = mask.squeeze().detach().cpu().numpy()
+    x = np.arange(len(mask_np))
+
+    plt.figure(figsize=(9, 3))
+    markerline, stemlines, baseline = plt.stem(x, mask_np)
+    plt.setp(markerline, markersize=4)
+    plt.xlabel("Port Index")
+    plt.ylabel("Observed")
+    plt.title("Observed Port Mask")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "observed_mask.png"), dpi=200)
+    plt.close()
+
+
+def plot_reconstruction_example(x_true, y_obs, x_zero, x_est, sample_idx, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+
+    # [2, N]
+    x_true_np = x_true[sample_idx].detach().cpu().numpy()
+    y_obs_np = y_obs[sample_idx].detach().cpu().numpy()
+    x_zero_np = x_zero[sample_idx].detach().cpu().numpy()
+    x_est_np = x_est[sample_idx].detach().cpu().numpy()
+
+    ports = np.arange(x_true_np.shape[1])
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=True)
+
+    # 实部
+    axes[0, 0].plot(ports, x_true_np[0], label="True", linewidth=2)
+    axes[0, 0].plot(ports, y_obs_np[0], label="Observed", linestyle="--")
+    axes[0, 0].plot(ports, x_zero_np[0], label="Zero-fill", linestyle=":")
+    axes[0, 0].plot(ports, x_est_np[0], label="Diffusion", linewidth=2)
+    axes[0, 0].set_title("Real Part Reconstruction")
+    axes[0, 0].grid(True, alpha=0.3)
+    axes[0, 0].legend()
+
+    # 虚部
+    axes[0, 1].plot(ports, x_true_np[1], label="True", linewidth=2)
+    axes[0, 1].plot(ports, y_obs_np[1], label="Observed", linestyle="--")
+    axes[0, 1].plot(ports, x_zero_np[1], label="Zero-fill", linestyle=":")
+    axes[0, 1].plot(ports, x_est_np[1], label="Diffusion", linewidth=2)
+    axes[0, 1].set_title("Imag Part Reconstruction")
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].legend()
+
+    # 绝对误差（实部）
+    axes[1, 0].plot(ports, np.abs(x_zero_np[0] - x_true_np[0]), label="Zero-fill Error")
+    axes[1, 0].plot(ports, np.abs(x_est_np[0] - x_true_np[0]), label="Diffusion Error")
+    axes[1, 0].set_title("Absolute Error (Real Part)")
+    axes[1, 0].set_xlabel("Port Index")
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].legend()
+
+    # 绝对误差（虚部）
+    axes[1, 1].plot(ports, np.abs(x_zero_np[1] - x_true_np[1]), label="Zero-fill Error")
+    axes[1, 1].plot(ports, np.abs(x_est_np[1] - x_true_np[1]), label="Diffusion Error")
+    axes[1, 1].set_title("Absolute Error (Imag Part)")
+    axes[1, 1].set_xlabel("Port Index")
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"reconstruction_sample_{sample_idx}.png"), dpi=220)
+    plt.close()
+
+
+def plot_batch_nmse_bar(zero_fill_nmse, diff_nmse, save_dir):
+    os.makedirs(save_dir, exist_ok=True)
+
+    labels = ["Zero-fill", "Diffusion"]
+    values = [zero_fill_nmse, diff_nmse]
+
+    plt.figure(figsize=(6, 5))
+    bars = plt.bar(labels, values)
+    plt.ylabel("NMSE (dB)")
+    plt.title("NMSE Comparison")
+    plt.grid(True, axis='y', alpha=0.3)
+    for bar, val in zip(bars, values):
+        plt.text(bar.get_x() + bar.get_width() / 2, val, f"{val:.3f}",
+                 ha='center', va='bottom' if val >= 0 else 'top')
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, "nmse_comparison.png"), dpi=200)
+    plt.close()
+
+
+# ============================================================
+# 11. 主程序
 # ============================================================
 
 def main():
     set_seed(42)
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    save_dir = "results_vis"
+    os.makedirs(save_dir, exist_ok=True)
 
     # ----------------------------
     # 超参数
@@ -483,7 +613,7 @@ def main():
     # ----------------------------
     # 训练
     # ----------------------------
-    ema_model = train_ddpm(
+    ema_model, loss_history, lr_history = train_ddpm(
         model=model,
         scheduler=scheduler,
         dataloader=train_loader,
@@ -493,12 +623,17 @@ def main():
         device=device
     )
 
+    # 训练曲线
+    plot_training_curves(loss_history, lr_history, save_dir)
+
     # ----------------------------
     # 构造部分端口观测
     # ----------------------------
     num_obs = int(num_ports * observed_ratio)
     observed_idx = np.sort(np.random.choice(num_ports, size=num_obs, replace=False))
     mask = make_port_selection_mask(num_ports, observed_idx).to(device)
+
+    plot_mask(mask, save_dir)
 
     test_x = test_x.to(device)
     y_obs = observe_partial_ports(test_x, mask, noise_std=noise_std)
@@ -522,6 +657,19 @@ def main():
     )
     diff_nmse = nmse_db(x_est, test_x)
 
+    # 单样本可视化
+    plot_reconstruction_example(
+        x_true=test_x,
+        y_obs=y_obs,
+        x_zero=x_zero_fill,
+        x_est=x_est,
+        sample_idx=0,
+        save_dir=save_dir
+    )
+
+    # NMSE 柱状图
+    plot_batch_nmse_bar(zero_fill_nmse, diff_nmse, save_dir)
+
     print("x_est has nan:", torch.isnan(x_est).any().item())
     print("x_est has inf:", torch.isinf(x_est).any().item())
     print("x_est abs max:", x_est.abs().max().item())
@@ -530,6 +678,7 @@ def main():
     print(f"Observed ratio      : {observed_ratio:.2f}")
     print(f"Zero-fill NMSE (dB) : {zero_fill_nmse:.3f}")
     print(f"Diffusion NMSE (dB) : {diff_nmse:.3f}")
+    print(f"Figures saved to    : {save_dir}/")
     print("=" * 60)
 
 
